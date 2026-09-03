@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Note</title>
+    <link rel="stylesheet" href="note.css" />
+  </head>
+  <body>
+    <div id="note">
+      <div id="titlebar">
+        <span id="grip" data-tauri-drag-region title="Drag to move">&#8942;&#8942;</span>
+        <input id="title" type="text" placeholder="Title" maxlength="80" />
+        <div id="toolbar">
+          <button id="color-btn" class="icon-btn" title="Color">&#9679;</button>
+          <button id="copy-btn" class="icon-btn" title="Copy note">
+            <svg viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+          </button>
+          <button id="paste-btn" class="icon-btn" title="Paste (replaces content)">
+            <svg viewBox="0 0 24 24"><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"></path><rect x="8" y="2" width="8" height="4" rx="1"></rect></svg>
+          </button>
+          <button id="new-btn" class="icon-btn" title="New note">
+            <svg viewBox="0 0 24 24"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+          </button>
+          <button id="pin-btn" class="icon-btn" title="Pin on top of all windows">
+            <svg viewBox="0 0 24 24"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"></path><circle cx="12" cy="10" r="3"></circle></svg>
+          </button>
+          <button id="minimize-btn" class="icon-btn" title="Minimize (restore via tray &gt; Show All Notes)">
+            <svg viewBox="0 0 24 24"><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+          </button>
+          <button id="delete-btn" class="icon-btn" title="Delete note">
+            <svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+          </button>
+        </div>
+        <div id="palette"></div>
+      </div>
+      <textarea id="content" placeholder="Type your note..."></textarea>
+      <div id="footer">
+        <button id="wrap-btn" class="icon-btn" title="Toggle text wrap">&#8617; Wrap</button>
+      </div>
+      <div id="confirm-overlay">
+        <div id="confirm-box">
+          <p id="confirm-message"></p>
+          <div id="confirm-actions">
+            <button id="confirm-cancel" type="button">Cancel</button>
+            <button id="confirm-ok" type="button">Delete</button>
+          </div>
+        </div>
+      </div>
+    </div>
+    <script type="module" src="note.js"></script>
+  </body>
+</html>
