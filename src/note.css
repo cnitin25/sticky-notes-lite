@@ -108,8 +108,8 @@ body {
 
 #palette {
   position: absolute;
-  top: 32px;
-  right: 8px;
+  bottom: 26px;
+  left: 8px;
   display: none;
   flex-wrap: wrap;
   gap: 6px;
@@ -157,9 +157,17 @@ body {
 
 #footer {
   display: flex;
-  justify-content: flex-end;
+  align-items: center;
+  justify-content: space-between;
+  position: relative;
   padding: 3px 8px;
   background: rgba(0, 0, 0, 0.16);
+}
+
+#footer-left {
+  display: flex;
+  align-items: center;
+  gap: 2px;
 }
 
 #footer .icon-btn {

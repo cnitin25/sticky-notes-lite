@@ -1,5 +1,6 @@
 const { invoke } = window.__TAURI__.core;
 const { getCurrentWindow } = window.__TAURI__.window;
+const { listen } = window.__TAURI__.event;
 const clipboard = window.__TAURI__.clipboardManager || {};
 const writeText = clipboard.writeText || (() => Promise.reject(new Error("clipboard plugin unavailable")));
 const readText = clipboard.readText || (() => Promise.reject(new Error("clipboard plugin unavailable")));
@@ -37,24 +38,44 @@ const el = {
   confirmCancel: document.getElementById("confirm-cancel"),
 };
 
+let confirmOpen = false;
+
 function showConfirm(message) {
+  // Re-entry would stack a second pair of listeners on the one shared overlay,
+  // and both copies would resolve on a single click.
+  if (confirmOpen) return Promise.resolve(false);
+  confirmOpen = true;
   return new Promise((resolve) => {
     el.confirmMessage.textContent = message;
     el.confirmOverlay.classList.add("open");
+    // Focus the safe choice: a plain Enter then cancels rather than deletes.
+    el.confirmCancel.focus();
     const cleanup = (result) => {
+      confirmOpen = false;
       el.confirmOverlay.classList.remove("open");
       el.confirmOk.removeEventListener("click", onOk);
       el.confirmCancel.removeEventListener("click", onCancel);
+      document.removeEventListener("keydown", onKey, true);
       resolve(result);
     };
     const onOk = () => cleanup(true);
     const onCancel = () => cleanup(false);
+    const onKey = (e) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        e.stopPropagation();
+        cleanup(false);
+      }
+    };
     el.confirmOk.addEventListener("click", onOk);
     el.confirmCancel.addEventListener("click", onCancel);
+    document.addEventListener("keydown", onKey, true);
   });
 }
 
 let saveTimer = null;
+let pendingSave = false;
+let loaded = false;
 let currentColor = COLORS[0];
 let wrapEnabled = false;
 let pinned = false;
@@ -76,8 +97,30 @@ function applyColor(color) {
 }
 
 function scheduleSave() {
+  pendingSave = true;
   clearTimeout(saveTimer);
-  saveTimer = setTimeout(save, 500);
+  saveTimer = setTimeout(() => {
+    flushSave();
+  }, 500);
+}
+
+/// Write out immediately instead of waiting for the debounce. Called whenever
+/// the note is about to stop being editable -- losing focus, being hidden, or
+/// being closed -- since anything typed inside the debounce window would
+/// otherwise go with the window.
+async function flushSave() {
+  clearTimeout(saveTimer);
+  saveTimer = null;
+  // Nothing typed since the last write, or the note hasn't loaded yet -- in
+  // which case saving would push empty fields over the real note on disk.
+  if (!pendingSave || !loaded) return;
+  pendingSave = false;
+  try {
+    await save();
+  } catch (err) {
+    pendingSave = true;
+    console.error(err);
+  }
 }
 
 async function save() {
@@ -123,12 +166,35 @@ function showFatalError(err) {
 async function init() {
   buildPalette();
 
+  // Registered before the note loads so a close arriving mid-load is still
+  // answered -- flushSave() is a no-op until there is something to write.
+  await listen("flush-save", () => {
+    flushSave();
+  });
+  await listen("save-and-close", async () => {
+    await flushSave();
+    await invoke("close_note");
+  });
+
+  // Covers the paths the backend can't see: clicking away to another window,
+  // and the webview being torn down.
+  window.addEventListener("blur", () => {
+    flushSave();
+  });
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) flushSave();
+  });
+  window.addEventListener("pagehide", () => {
+    flushSave();
+  });
+
   const note = await invoke("load_note", { id: noteId });
   el.title.value = note.title;
   el.content.value = note.content;
   applyColor(note.color);
   applyWrap(note.wrap);
   applyPinned(note.pinned);
+  loaded = true;
 
   el.title.addEventListener("input", () => {
     appWindow.setTitle(el.title.value.trim() || "Note").catch(() => {});
@@ -162,11 +228,19 @@ async function init() {
   });
 
   el.pinBtn.addEventListener("click", async () => {
-    applyPinned(!pinned);
-    await invoke("set_pinned", { id: noteId, pinned });
+    // Only reflect the new state once the backend has actually applied it,
+    // otherwise a failure leaves the button lit over an unpinned window.
+    const next = !pinned;
+    try {
+      await invoke("set_pinned", { id: noteId, pinned: next });
+      applyPinned(next);
+    } catch (err) {
+      console.error(err);
+    }
   });
 
   el.minimizeBtn.addEventListener("click", async () => {
+    await flushSave();
     await invoke("minimize_note");
   });
 
@@ -178,7 +252,20 @@ async function init() {
   el.deleteBtn.addEventListener("click", async () => {
     if (await showConfirm("Delete this note permanently?")) {
       clearTimeout(saveTimer);
+      pendingSave = false;
       await invoke("delete_note", { id: noteId });
+    }
+  });
+
+  document.addEventListener("keydown", (e) => {
+    if (confirmOpen) return;
+    if (e.key === "Escape" && el.palette.classList.contains("open")) {
+      el.palette.classList.remove("open");
+      return;
+    }
+    if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === "n") {
+      e.preventDefault();
+      invoke("create_note").catch((err) => console.error(err));
     }
   });
 }

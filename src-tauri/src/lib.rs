@@ -1,25 +1,85 @@
 mod notes;
 
 use notes::{Note, NoteFields, Position, Size};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
+use std::time::Duration;
 use tauri::{
     menu::{Menu, MenuItem},
     tray::TrayIconBuilder,
-    AppHandle, Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent,
+    AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent,
 };
 
+/// Coalescing window for drag/resize writes. `Moved`/`Resized` arrive roughly
+/// once per frame while a window is being dragged, so writing on each one meant
+/// a full read-parse-serialize-write of the note's JSON per frame, on the main
+/// thread that is also pumping WebView2. Geometry is now accumulated in memory
+/// and written at most this often, from a background thread.
+const GEOMETRY_FLUSH_MS: u64 = 400;
+
+/// How long a note window waits for its webview to save and close itself before
+/// it is closed anyway. Only reached if the frontend is wedged -- a note that
+/// refuses to close would be worse than losing the last few keystrokes.
+const CLOSE_WATCHDOG_MS: u64 = 800;
+
+/// How long to give every note's webview to write out unsaved text after the
+/// tray's Quit asks it to, before the process exits.
+const QUIT_FLUSH_GRACE_MS: u64 = 250;
+
+#[derive(Default)]
+struct PendingGeometry {
+    position: Option<Position>,
+    size: Option<Size>,
+}
+
 struct AppState {
-    open_ids: Mutex<HashSet<String>>,
     next_offset: Mutex<i32>,
     quitting: AtomicBool,
+    /// Geometry not yet written to disk, keyed by note id.
+    pending_geometry: Mutex<HashMap<String, PendingGeometry>>,
+    /// Window labels whose next `CloseRequested` should be allowed through --
+    /// set once the webview has flushed its unsaved text.
+    close_allowed: Mutex<HashSet<String>>,
 }
 
 const NOTE_PREFIX: &str = "note-";
 
 fn window_label(id: &str) -> String {
     format!("{NOTE_PREFIX}{id}")
+}
+
+/// A panic elsewhere while holding one of these locks would otherwise poison it
+/// and break every later save; the state they guard is plain data, so carrying
+/// on with it is correct here.
+fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+fn queue_geometry(app: &AppHandle, id: &str, position: Option<Position>, size: Option<Size>) {
+    let state = app.state::<AppState>();
+    let mut pending = lock(&state.pending_geometry);
+    let entry = pending.entry(id.to_string()).or_default();
+    if position.is_some() {
+        entry.position = position;
+    }
+    if size.is_some() {
+        entry.size = size;
+    }
+}
+
+fn flush_geometry(app: &AppHandle) {
+    let drained: Vec<(String, PendingGeometry)> = {
+        let state = app.state::<AppState>();
+        let mut pending = lock(&state.pending_geometry);
+        if pending.is_empty() {
+            return;
+        }
+        pending.drain().collect()
+    };
+    for (id, geometry) in drained {
+        notes::update_note_geometry(app, &id, geometry.position, geometry.size);
+    }
 }
 
 /// Ensure a note's saved position keeps at least its title bar on some
@@ -100,24 +160,34 @@ fn open_note_window(app: &AppHandle, note: &Note) {
         builder = builder.always_on_top(true);
     }
 
-    if builder.build().is_ok() {
-        let state = app.state::<AppState>();
-        state.open_ids.lock().unwrap().insert(note.id.clone());
+    if let Err(e) = builder.build() {
+        eprintln!("could not open note {}: {e}", note.id);
     }
 }
 
 fn spawn_new_note(app: &AppHandle) {
     let offset = {
         let state = app.state::<AppState>();
-        let mut offset = state.next_offset.lock().unwrap();
+        let mut offset = lock(&state.next_offset);
         let current = *offset as f64;
         *offset = (*offset + 30) % 300;
         current
     };
 
     let note = notes::create_note_default(offset);
-    notes::save_note_to_disk(app, &note);
+    if let Err(e) = notes::save_note_to_disk(app, &note) {
+        // Opening a window for a note that isn't on disk would hand the user an
+        // editor whose every save fails, so stop here instead.
+        eprintln!("could not create note: {e}");
+        return;
+    }
     open_note_window(app, &note);
+}
+
+/// Mark a window as cleared to close, so the `CloseRequested` handler lets the
+/// next attempt through instead of asking the webview to flush again.
+fn allow_close(app: &AppHandle, label: &str) {
+    lock(&app.state::<AppState>().close_allowed).insert(label.to_string());
 }
 
 #[tauri::command]
@@ -161,8 +231,18 @@ fn create_note(app: AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn minimize_note(window: tauri::Window) -> Result<(), String> {
+fn minimize_note(app: AppHandle, window: tauri::Window) -> Result<(), String> {
+    // A hidden window stops emitting Moved/Resized, so settle its geometry now.
+    flush_geometry(&app);
     window.hide().map_err(|e| e.to_string())
+}
+
+/// Called by a note's webview once it has written out any unsaved text in
+/// response to `save-and-close`. See the `CloseRequested` handler.
+#[tauri::command]
+fn close_note(app: AppHandle, window: tauri::Window) -> Result<(), String> {
+    allow_close(&app, window.label());
+    window.close().map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -175,10 +255,10 @@ fn set_pinned(app: AppHandle, window: tauri::Window, id: String, pinned: bool) -
 #[tauri::command]
 fn delete_note(app: AppHandle, window: tauri::Window, id: String) -> Result<(), String> {
     notes::delete_note(&app, &id)?;
-    {
-        let state = app.state::<AppState>();
-        state.open_ids.lock().unwrap().remove(&id);
-    }
+    // Drop any geometry still queued for a note that no longer exists, and skip
+    // the save-and-close handshake -- there is nothing left to save into.
+    lock(&app.state::<AppState>().pending_geometry).remove(&id);
+    allow_close(&app, window.label());
     let _ = window.close();
     Ok(())
 }
@@ -189,20 +269,29 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .manage(AppState {
-            open_ids: Mutex::new(HashSet::new()),
             next_offset: Mutex::new(0),
             quitting: AtomicBool::new(false),
+            pending_geometry: Mutex::new(HashMap::new()),
+            close_allowed: Mutex::new(HashSet::new()),
         })
         .invoke_handler(tauri::generate_handler![
             load_note,
             save_note,
             create_note,
             minimize_note,
+            close_note,
             set_pinned,
             delete_note
         ])
         .setup(|app| {
             let handle = app.handle().clone();
+
+            // Drain queued drag/resize geometry off the main thread.
+            let geometry_handle = handle.clone();
+            std::thread::spawn(move || loop {
+                std::thread::sleep(Duration::from_millis(GEOMETRY_FLUSH_MS));
+                flush_geometry(&geometry_handle);
+            });
 
             let new_note_item = MenuItem::with_id(app, "new-note", "New Note", true, None::<&str>)?;
             let show_all_item =
@@ -236,10 +325,21 @@ pub fn run() {
                         });
                     }
                     "quit" => {
-                        app.state::<AppState>()
-                            .quitting
-                            .store(true, Ordering::SeqCst);
-                        app.exit(0);
+                        // Exiting straight away would discard anything typed
+                        // inside the frontend's save debounce, so ask every
+                        // note to write out first and give the IPC round trip
+                        // a moment to land. Done off the main thread so the
+                        // wait doesn't block the event loop those saves
+                        // travel over.
+                        let app = app.clone();
+                        std::thread::spawn(move || {
+                            let _ = app.emit("flush-save", ());
+                            std::thread::sleep(Duration::from_millis(QUIT_FLUSH_GRACE_MS));
+                            flush_geometry(&app);
+                            app.state::<AppState>().quitting.store(true, Ordering::SeqCst);
+                            let handle = app.clone();
+                            let _ = app.run_on_main_thread(move || handle.exit(0));
+                        });
                     }
                     _ => {}
                 });
@@ -260,12 +360,34 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| match event {
-            WindowEvent::CloseRequested { .. } => {
+            WindowEvent::CloseRequested { api, .. } => {
                 let label = window.label().to_string();
-                if let Some(id) = label.strip_prefix(NOTE_PREFIX) {
-                    let state = window.app_handle().state::<AppState>();
-                    state.open_ids.lock().unwrap().remove(id);
+                if !label.starts_with(NOTE_PREFIX) {
+                    return;
                 }
+                let app = window.app_handle().clone();
+                // Settle this note's position/size while its window still exists.
+                flush_geometry(&app);
+
+                let cleared = lock(&app.state::<AppState>().close_allowed).remove(&label);
+                if cleared || app.state::<AppState>().quitting.load(Ordering::SeqCst) {
+                    return;
+                }
+
+                // The webview may hold up to one debounce window of typing that
+                // has never reached disk, and closing destroys it. Hold the
+                // close, ask the note to save, and let it close itself.
+                api.prevent_close();
+                let _ = app.emit_to(label.as_str(), "save-and-close", ());
+
+                // ...but never trap a note open if its webview doesn't answer.
+                std::thread::spawn(move || {
+                    std::thread::sleep(Duration::from_millis(CLOSE_WATCHDOG_MS));
+                    if let Some(win) = app.get_webview_window(&label) {
+                        allow_close(&app, &label);
+                        let _ = win.close();
+                    }
+                });
             }
             WindowEvent::Moved(pos) => {
                 let label = window.label().to_string();
@@ -275,7 +397,7 @@ pub fn run() {
                     // so a restored window lands where it was left, on any
                     // DPI-scaled display.
                     let scale = window.scale_factor().unwrap_or(1.0);
-                    notes::update_note_geometry(
+                    queue_geometry(
                         window.app_handle(),
                         id,
                         Some(Position {
@@ -290,7 +412,7 @@ pub fn run() {
                 let label = window.label().to_string();
                 if let Some(id) = label.strip_prefix(NOTE_PREFIX) {
                     let scale = window.scale_factor().unwrap_or(1.0);
-                    notes::update_note_geometry(
+                    queue_geometry(
                         window.app_handle(),
                         id,
                         None,
@@ -316,6 +438,9 @@ pub fn run() {
                     .load(Ordering::SeqCst);
                 if !quitting {
                     api.prevent_exit();
+                } else {
+                    // Last chance to persist geometry queued but not yet drained.
+                    flush_geometry(app_handle);
                 }
             }
         });
