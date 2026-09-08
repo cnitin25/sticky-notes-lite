@@ -47,6 +47,10 @@ pub struct Note {
     pub wrap: bool,
     #[serde(default)]
     pub pinned: bool,
+    /// Hidden via the note's own minimize button. Persisted so a minimized note
+    /// stays minimized across a restart rather than reappearing on screen.
+    #[serde(default)]
+    pub minimized: bool,
     pub created_at: u64,
     pub updated_at: u64,
 }
@@ -164,6 +168,19 @@ pub fn update_note_pinned(app: &AppHandle, id: &str, pinned: bool) {
     }
 }
 
+/// No-op when the flag already matches, so the startup pass and every window
+/// restore don't rewrite files that have nothing to change.
+pub fn update_note_minimized(app: &AppHandle, id: &str, minimized: bool) {
+    let _guard = lock_io();
+    if let Ok(mut note) = read_note(app, id) {
+        if note.minimized == minimized {
+            return;
+        }
+        note.minimized = minimized;
+        let _ = write_note(app, &note);
+    }
+}
+
 pub fn update_note_geometry(
     app: &AppHandle,
     id: &str,
@@ -202,6 +219,7 @@ pub fn create_note_default(offset: f64) -> Note {
         },
         wrap: false,
         pinned: false,
+        minimized: false,
         size: Size {
             width: 260.0,
             height: 260.0,

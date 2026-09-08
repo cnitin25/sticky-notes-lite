@@ -10,14 +10,15 @@ A lightweight, fully offline sticky-notes app for Windows, built with Tauri v2 (
 - **Spell-check is disabled** on both the title and the body (`spellcheck="false"` in `note.html`). WebView2 ships Chromium's spellchecker and enables it on every editable field by default, which red-underlines most of what actually gets pasted into these notes. There is no per-note toggle — if one is ever wanted it is `el.content.spellcheck = ...`, persisted alongside `wrap`
 - One-click **copy** (copies note content only, not the title) and **paste**
 - **Paste replaces the entire note, deliberately** — this is the intended behaviour, not an oversight. The button exists to make a note *be* whatever is on the clipboard; ordinary Ctrl+V is still available for inserting at the caret. Two consequences, both accepted: it does not confirm the way Delete does, and because it assigns `el.content.value` directly it also clears the textarea's native undo stack, so Ctrl+Z will not bring the previous content back. Don't "fix" this into an insert-at-caret — that is what Ctrl+V already does
-- **Minimize**: hides the note window; bring it back via the tray's "Show All Notes"
+- **Minimize**: hides the note window, and the state is **persisted** — a note minimized when the app closes stays minimized on next launch instead of reappearing on screen. Bring one back from the tray's **Restore** submenu
 - **Pin**: keeps a note always on top of every other window (not just other notes) — persisted, so a pinned note reopens pinned
 - **New note** button on every note's toolbar (in addition to the tray's "New Note") — a fresh note isn't focused automatically (click into it before typing); this is deliberate, see "Notable bugs fixed" below
 - Delete with an in-page confirmation dialog (not the browser's native `confirm()`, which clips on small windows)
 - Auto-save (debounced ~500ms) to `%APPDATA%\com.stickynoteslite.desktop\notes\<uuid>.json`, plus an immediate flush whenever the note stops being editable — losing focus, being hidden/minimized, being closed, or the tray's Quit (see "Unsaved text could be lost on close or Quit" below)
 - Position/size auto-saved on drag/resize — coalesced in memory and written at most every ~400ms from a background thread, not once per frame — restored on next launch, with a safety clamp so a note can never reopen fully off-screen
 - Keyboard: **Ctrl+N** new note, **Esc** closes the color palette or cancels the delete dialog (which opens with *Cancel* focused, so a stray Enter can never delete)
-- No taskbar icon (tray-only); system tray menu: **New Note**, **Show All Notes**, **Quit**
+- No taskbar icon (tray-only); system tray menu: **New Note**, **Restore ▸**, **Quit**. The Restore submenu lists **All Notes** plus one entry per currently-minimized note, labelled by its title (or first non-blank line, or `(empty note)`), so a single note can be brought back without unhiding the rest
+- If *every* note is minimized the app legitimately starts with no windows at all — it is tray-resident, and forcing one open would defeat the point of having minimized them
 - Quitting via the tray actually exits (as opposed to the Tauri default of quitting whenever the last window closes, which would fight against the tray-resident design)
 
 ## Project layout
@@ -183,11 +184,44 @@ integrity policy (Policy ID: {0283ac0f-fff1-49ae-ada1-8a933130cad6}).
 
 **On another machine**: whether this friction shows up at all depends on whether *that* machine has Smart App Control enabled (it's opt-in even on clean Windows 11 installs). Confirmed on a second laptop without SAC: the exe just shows a normal SmartScreen "unrecognized publisher" prompt with a working "Run anyway" — no certificate setup needed there at all. If SAC-blocked friction on other machines becomes a recurring problem, look into **Azure Trusted Signing** (~$10/month, a real broadly-recognized certificate without the overhead of Microsoft Store submission) rather than continuing to fight self-signing per machine.
 
+## Changing the app icon
+
+Everything under `src-tauri/icons/` is **generated** -- don't hand-edit it. Supply a square source PNG (1024x1024 or larger, with transparency; the current icon came from a 1254x1254 one) and regenerate with Tauri's own generator:
+
+```powershell
+npm run tauri icon path\to\your-icon.png
+Remove-Item -Recurse -Force src-tauri\icons\android, src-tauri\icons\ios   # Windows-only app
+```
+
+The source PNG is deliberately **not** kept in the repo -- it is only needed when the icon changes, and `icon.png` (512x512) plus `icon.ico` (256x256 entry) are already committed if a rough regeneration is ever needed. Keep the full-resolution original somewhere outside the project if you may want to re-derive at full quality.
+
+**The build will silently keep the old icon unless you also delete the build-script cache.** This cost a full debug cycle once, so it is worth stating plainly:
+
+```powershell
+Remove-Item -Recurse -Force src-tauri\target\release\build\sticky-notes-lite-*
+npm run tauri build -- --no-bundle
+```
+
+Why: `tauri-build` writes an `out/resource.rc` that references `icons\icon.ico` **by path**, and `embed-resource` compiles it to `out/resource.lib`. Neither cargo nor `embed-resource` tracks the *contents* of the referenced `.ico`, so once `resource.lib` exists it is reused even though the icon changed underneath it. `cargo clean -p sticky-notes-lite` does **not** reliably remove that directory either -- it was observed leaving a `resource.lib` two builds stale. Deleting the crate's build directory is what actually forces the resource to recompile.
+
+**Explorer will keep showing the old icon after a correct rebuild.** This is Windows' per-path icon cache, not a build problem -- the exe is fine, the shell is lying. `ie4uinit.exe -show` refreshes it without restarting Explorer; the heavier fix (kill Explorer, delete `%LocalAppData%\Microsoft\Windows\Explorer\iconcache_*.db`, restart) is rarely needed and would also drop the app's tray icon until it is relaunched. The tray icon updates immediately on relaunch either way, so "tray icon changed but the exe icon didn't" is the signature of this, not of a failed build.
+
+To verify an icon actually shipped rather than trusting the build (Explorer and `ExtractAssociatedIcon` will both happily show you a cached icon), check that the `.ico`'s own bytes are inside the exe. Take the signature from a **high-entropy** slice -- the 256x256 entry is PNG-compressed and works well. A slice from a mostly-transparent region is nearly all zero bytes and will match any binary, producing a false positive:
+
+```python
+# 256x256 entry of icon.ico, middle 128 bytes, must appear in the exe
+sig in open("dist/sticky-notes-lite.exe", "rb").read()
+```
+
+**On icon size and RAM**: Windows embeds `icon.ico`, and Tauri decodes it once into a raw RGBA buffer for `default_window_icon` -- which this app reuses for the tray icon (`tray.icon(icon.clone())`), so it is not paid twice. The cost is the largest entry: 256x256 = 256 KB resident, one allocation at startup. Shipping the 1254x1254 source directly as the window icon would instead cost ~6 MB, which is the real reason to generate proper sizes. Measured private working set was 5.56 MB before the icon change and 4.58 MB after -- the icon is far below run-to-run variance.
+
+Note `icon.icns` is macOS-only and never embedded in a Windows build; regenerating grew it from 98 KB to 1.52 MB of repo size for a file this app never reads. Drop it from `bundle.icon` if the repo size matters more than keeping the cross-platform option open.
+
 ## Data location
 
 Notes live in `%APPDATA%\com.stickynoteslite.desktop\notes\<uuid>.json` — independent of where the `.exe` runs from. Moving/renaming/copying the exe never affects existing notes; only changing `identifier` in `src-tauri\tauri.conf.json` would (don't).
 
-Note JSON schema: `{ id, title, content, color, position: {x,y}, size: {width,height}, wrap, pinned, created_at, updated_at }` — all in logical (DPI-independent) pixels for position/size. `wrap` and `pinned` both default to `false` when absent from an older file.
+Note JSON schema: `{ id, title, content, color, position: {x,y}, size: {width,height}, wrap, pinned, minimized, created_at, updated_at }` — all in logical (DPI-independent) pixels for position/size. `wrap`, `pinned` and `minimized` all default to `false` when absent from an older file.
 
 `id` is a UUID and doubles as the filename, so `notes.rs` validates it with `Uuid::parse_str` before building any path — a malformed or crafted id can never address a file outside the notes directory.
 
@@ -230,3 +264,9 @@ Drop a shortcut to `dist\sticky-notes-lite.exe` into the Startup folder (`Win+R`
   - A CSP is set in `tauri.conf.json` (it was `null`, i.e. disabled). `script-src 'self'` is the part that matters; `style-src` keeps `'unsafe-inline'` because `showFatalError()` injects a `style=` attribute and styling is not the attack surface here.
   - Pin no longer updates the button optimistically — it awaits `set_pinned` and only then reflects the new state, so a failure can't leave the button lit over an unpinned window.
   - The delete dialog handles Esc, opens with **Cancel** focused (so Enter cancels rather than deletes), and guards against being opened twice — a second open used to stack another pair of listeners on the one shared overlay, and both copies resolved on a single click.
+
+- **Minimized notes reopened on every launch**: minimize only called `window.hide()`, which is process-local state, so a restart had no idea a note had been hidden and rebuilt a window for all of them. `Note.minimized` now persists it. The startup pass skips minimized notes entirely rather than building a hidden window for each — cheaper, and it keeps `open_note_window()` as the single place that un-minimizes (it clears the flag, then either un-hides an existing window or builds one on demand). `update_note_minimized()` is a no-op when the flag already matches, so the startup pass and ordinary restores don't rewrite files that have nothing to change.
+
+- **The tray's "Show All Notes" became a "Restore" submenu**: **All Notes** (the old behaviour), a separator, then one entry per currently-minimized note. Two things worth knowing if you touch this:
+  - **The OS builds a tray menu once**, so the Restore list has to be rebuilt whenever the set of minimized notes changes. `refresh_tray_menu()` does that and is called from minimize, from each restore, and from delete (a deleted note may have been in the list). It must only be called on the main thread — from a command handler, or inside a `run_on_main_thread` closure — for the same reasons documented in the deadlock notes above. `TrayIconBuilder::with_id(TRAY_ID)` exists purely so `app.tray_by_id()` can find the icon again to call `set_menu()`.
+  - **Menu ids are matched by prefix**, so `RESTORE_PREFIX` is `restore-note-` while "All Notes" is `restore-all` — deliberately *not* sharing the prefix, so the catch-all arm's `strip_prefix()` can't swallow it. Note labels get `&` doubled, since Windows menus read a single `&` as a mnemonic marker and would eat it.

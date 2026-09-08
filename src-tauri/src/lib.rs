@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 use tauri::{
-    menu::{Menu, MenuItem},
+    menu::{Menu, MenuItem, SubmenuBuilder},
     tray::TrayIconBuilder,
     AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent,
 };
@@ -45,8 +45,93 @@ struct AppState {
 
 const NOTE_PREFIX: &str = "note-";
 
+/// Tray menu id prefix for "restore this one note" entries. `RESTORE_ALL_ID`
+/// deliberately does not start with it, so the two can't be confused when
+/// matching the menu event.
+const RESTORE_PREFIX: &str = "restore-note-";
+const RESTORE_ALL_ID: &str = "restore-all";
+const TRAY_ID: &str = "main";
+
+/// Longest note label shown in the Restore submenu before it is elided.
+const MENU_LABEL_CHARS: usize = 40;
+
 fn window_label(id: &str) -> String {
     format!("{NOTE_PREFIX}{id}")
+}
+
+/// What to call a note in the Restore submenu: its title, else its first
+/// non-blank line, else a placeholder -- an untitled note is common here, and
+/// "Note / Note / Note" would make the list useless.
+fn menu_label(note: &Note) -> String {
+    let title = note.title.trim();
+    let source = if !title.is_empty() {
+        title
+    } else {
+        note.content
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty())
+            .unwrap_or("")
+    };
+    if source.is_empty() {
+        return "(empty note)".to_string();
+    }
+    let mut label: String = source.chars().take(MENU_LABEL_CHARS).collect();
+    if source.chars().count() > MENU_LABEL_CHARS {
+        label.push('…');
+    }
+    // Windows menus read a single `&` as a mnemonic marker and swallow it.
+    label.replace('&', "&&")
+}
+
+fn build_tray_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
+    let new_note = MenuItem::with_id(app, "new-note", "New Note", true, None::<&str>)?;
+    let all_notes = MenuItem::with_id(app, RESTORE_ALL_ID, "All Notes", true, None::<&str>)?;
+
+    let minimized: Vec<Note> = notes::list_notes(app)
+        .into_iter()
+        .filter(|note| note.minimized)
+        .collect();
+
+    let mut restore = SubmenuBuilder::new(app, "Restore").item(&all_notes);
+    if minimized.is_empty() {
+        // Kept visible but disabled, so the submenu never looks broken.
+        let none = MenuItem::with_id(app, "restore-none", "No minimized notes", false, None::<&str>)?;
+        restore = restore.separator().item(&none);
+    } else {
+        restore = restore.separator();
+        for note in &minimized {
+            let item = MenuItem::with_id(
+                app,
+                format!("{RESTORE_PREFIX}{}", note.id),
+                menu_label(note),
+                true,
+                None::<&str>,
+            )?;
+            restore = restore.item(&item);
+        }
+    }
+    let restore = restore.build()?;
+
+    let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
+    Menu::with_items(app, &[&new_note, &restore, &quit])
+}
+
+/// The tray menu is built once by the OS, so the Restore list has to be
+/// rebuilt whenever the set of minimized notes changes. Call this only from
+/// the main thread (command handlers, or inside a `run_on_main_thread`).
+fn refresh_tray_menu(app: &AppHandle) {
+    let Some(tray) = app.tray_by_id(TRAY_ID) else {
+        return;
+    };
+    match build_tray_menu(app) {
+        Ok(menu) => {
+            if let Err(e) = tray.set_menu(Some(menu)) {
+                eprintln!("could not update tray menu: {e}");
+            }
+        }
+        Err(e) => eprintln!("could not rebuild tray menu: {e}"),
+    }
 }
 
 /// A panic elsewhere while holding one of these locks would otherwise poison it
@@ -114,6 +199,11 @@ fn clamp_to_visible_area(app: &AppHandle, pos: Position) -> Position {
 }
 
 fn open_note_window(app: &AppHandle, note: &Note) {
+    // Showing a note is what un-minimizes it, whether that means un-hiding an
+    // existing window or building one the startup pass deliberately skipped.
+    if note.minimized {
+        notes::update_note_minimized(app, &note.id, false);
+    }
     let label = window_label(&note.id);
     if let Some(existing) = app.get_webview_window(&label) {
         // Already open (possibly minimized/hidden) -- bring it back instead of no-op.
@@ -234,7 +324,12 @@ fn create_note(app: AppHandle) -> Result<(), String> {
 fn minimize_note(app: AppHandle, window: tauri::Window) -> Result<(), String> {
     // A hidden window stops emitting Moved/Resized, so settle its geometry now.
     flush_geometry(&app);
-    window.hide().map_err(|e| e.to_string())
+    if let Some(id) = window.label().strip_prefix(NOTE_PREFIX) {
+        notes::update_note_minimized(&app, id, true);
+    }
+    window.hide().map_err(|e| e.to_string())?;
+    refresh_tray_menu(&app);
+    Ok(())
 }
 
 /// Called by a note's webview once it has written out any unsaved text in
@@ -260,6 +355,8 @@ fn delete_note(app: AppHandle, window: tauri::Window, id: String) -> Result<(), 
     lock(&app.state::<AppState>().pending_geometry).remove(&id);
     allow_close(&app, window.label());
     let _ = window.close();
+    // A deleted note may have been in the Restore list.
+    refresh_tray_menu(&app);
     Ok(())
 }
 
@@ -293,13 +390,9 @@ pub fn run() {
                 flush_geometry(&geometry_handle);
             });
 
-            let new_note_item = MenuItem::with_id(app, "new-note", "New Note", true, None::<&str>)?;
-            let show_all_item =
-                MenuItem::with_id(app, "show-all", "Show All Notes", true, None::<&str>)?;
-            let quit_item = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&new_note_item, &show_all_item, &quit_item])?;
+            let menu = build_tray_menu(&handle)?;
 
-            let mut tray = TrayIconBuilder::new()
+            let mut tray = TrayIconBuilder::with_id(TRAY_ID)
                 .tooltip("Sticky Notes Lite")
                 .menu(&menu)
                 .on_menu_event(|app, event| match event.id.as_ref() {
@@ -313,7 +406,7 @@ pub fn run() {
                             let _ = app.run_on_main_thread(move || spawn_new_note(&handle));
                         });
                     }
-                    "show-all" => {
+                    RESTORE_ALL_ID => {
                         let app = app.clone();
                         std::thread::spawn(move || {
                             let handle = app.clone();
@@ -321,6 +414,7 @@ pub fn run() {
                                 for note in notes::list_notes(&handle) {
                                     open_note_window(&handle, &note);
                                 }
+                                refresh_tray_menu(&handle);
                             });
                         });
                     }
@@ -341,7 +435,24 @@ pub fn run() {
                             let _ = app.run_on_main_thread(move || handle.exit(0));
                         });
                     }
-                    _ => {}
+                    other => {
+                        // One "restore this note" entry, keyed by note id.
+                        let Some(note_id) = other.strip_prefix(RESTORE_PREFIX) else {
+                            return;
+                        };
+                        let app = app.clone();
+                        let note_id = note_id.to_string();
+                        std::thread::spawn(move || {
+                            let handle = app.clone();
+                            let _ = app.run_on_main_thread(move || {
+                                match notes::load_note(&handle, &note_id) {
+                                    Ok(note) => open_note_window(&handle, &note),
+                                    Err(e) => eprintln!("could not restore {note_id}: {e}"),
+                                }
+                                refresh_tray_menu(&handle);
+                            });
+                        });
+                    }
                 });
             if let Some(icon) = app.default_window_icon() {
                 tray = tray.icon(icon.clone());
@@ -352,8 +463,14 @@ pub fn run() {
             if existing.is_empty() {
                 spawn_new_note(&handle);
             } else {
-                for note in existing {
-                    open_note_window(&handle, &note);
+                // A note minimized before the last shutdown stays minimized:
+                // no window is built for it at all, and it is reachable from
+                // the tray's Restore submenu. If every note is minimized the
+                // app legitimately starts with no windows -- it is a
+                // tray-resident app, and forcing one open would defeat the
+                // point of having minimized them.
+                for note in existing.iter().filter(|note| !note.minimized) {
+                    open_note_window(&handle, note);
                 }
             }
 
