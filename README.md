@@ -47,12 +47,43 @@ Every note window loads `note.html?id=<uuid>`, reading the id from the URL query
 ## Building a release exe
 
 ```powershell
-npm run tauri build
+.\build-release.ps1            # build + sign
+.\build-release.ps1 -Deploy    # build + sign + swap into dist\ and relaunch
+.\build-release.ps1 -SkipSign  # build only
 ```
 
-Produces `src-tauri\target\release\sticky-notes-lite.exe` (portable) plus MSI/NSIS installers under `src-tauri\target\release\bundle\`. `target\` is disposable build cache (can grow to several GB) — safe to delete, `npm run tauri build` regenerates it from scratch (a few minutes) whenever needed.
+**Use the script, not a bare `npm run tauri build`, for anything you actually ship.** A plain build bakes build-machine paths into the binary; the script passes the `--remap-path-prefix` flags that keep them out (see "What the release build strips out" below). It also clears the build-script cache, which is required whenever the icon changes.
+
+A bare `npm run tauri build` still works for a throwaway local build, and adding `-- --no-bundle` skips the MSI/NSIS installers (nothing here uses them -- the app runs from `dist\`). It produces `src-tauri\target\release\sticky-notes-lite.exe` plus, without `--no-bundle`, installers under `src-tauri\target\release\bundle\`. `target\` is disposable build cache (can grow to several GB) — safe to delete, `npm run tauri build` regenerates it from scratch (a few minutes) whenever needed.
 
 **Frontend changes need a full rebuild too** — in a release build, `src/*.html|css|js` get embedded into the compiled binary; editing them on disk has no effect until you rebuild (unlike `tauri dev`, which serves them live).
+
+## What the release build strips out
+
+A default release build leaks the build machine into the shipped binary. Measured on a real build, before this was addressed:
+
+- a **CodeView debug directory entry** naming `sticky_notes_lite.pdb`, and
+- **536 absolute local paths** -- 370 `C:\Users\<you>\.cargo\registry\src\...` and 165 `C:\Users\<you>\.rustup\toolchains\...`.
+
+The important detail is *where* those paths live: **`.rdata`, not debug info.** They are `panic!` location strings -- rustc bakes the absolute source path of every crate into the `Location` records behind `unwrap()`, bounds checks and friends. So `strip` does not remove them and neither does anything else that only touches debug data. Only `--remap-path-prefix` does.
+
+Two independent fixes, therefore:
+
+| Leak | Fix | Where |
+|---|---|---|
+| CodeView entry / `.pdb` reference | `strip = true` plus `-Clink-arg=/DEBUG:NONE` | `[profile.release]` in `src-tauri/Cargo.toml`, and `build-release.ps1` |
+| 536 `.cargo` / `.rustup` paths in `.rdata` | `--remap-path-prefix` | `build-release.ps1` |
+
+`build-release.ps1` derives the prefixes from `CARGO_HOME` / `RUSTUP_HOME` (falling back to `%USERPROFILE%`) rather than hardcoding them, so no username is committed to the repo. Result, verified by scanning the binary: **0** occurrences of the username in ASCII or UTF-16, and 536 `[cargo]` / `[rustup]` / `[src]` markers in their place.
+
+`trim-paths` in `[profile.release]` would be the tidier fix, but it is **not stabilized in Cargo 1.98** -- it fails the manifest parse with "feature `trim-paths` is required". Revisit when it stabilizes and the script's remap flags can go away.
+
+What deliberately remains:
+
+- **67 `/rustc/<hash>/library/...` paths.** These come from the precompiled standard library, which the Rust project already remaps; they describe nothing about this machine.
+- **A 1028-byte `POGO` debug directory entry.** Linker optimization metadata containing no paths.
+
+**Trade-off**: no `.pdb` is produced at all now, so a future crash dump resolves only to module+offset. That is exactly what the deadlock investigation described below worked from, so this costs nothing that was being relied on -- but if you ever need full symbols, build once with `strip = false` and without `/DEBUG:NONE`, and keep that `.pdb` locally rather than shipping it.
 
 ## Code signing (this machine has Smart App Control enabled)
 
@@ -65,7 +96,7 @@ Windows 11 Smart App Control (SAC) blocks unsigned executables outright — no "
 - Store: `Cert:\CurrentUser\My` (private key), trusted via `LocalMachine\Root` + `LocalMachine\TrustedPublisher`
 - Valid until 2036
 
-Sign every new build with:
+`build-release.ps1` does this for you. To sign by hand:
 
 ```powershell
 $signtool = "C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x64\signtool.exe"

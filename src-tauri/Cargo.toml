@@ -26,3 +26,10 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 uuid = { version = "1", features = ["v4"] }
 
+[profile.release]
+# Drop the linker's CodeView entry (and the sticky_notes_lite.pdb reference
+# with it). The absolute .cargo/.rustup paths are a separate problem -- they
+# are panic-location strings in .rdata, not debug info, so `strip` does not
+# touch them; build via build-release.ps1, which passes --remap-path-prefix.
+# (`trim-paths` would be the tidier fix but is still unstable in Cargo 1.98.)
+strip = true
