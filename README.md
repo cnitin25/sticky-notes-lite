@@ -2,7 +2,9 @@
 
 A lightweight, fully offline sticky-notes app for Windows, built with Tauri v2 (Rust backend + vanilla HTML/CSS/JS frontend, no bundler). Each note is its own draggable, resizable OS window; there's no visible main window — the app lives entirely in the system tray. Notes persist as individual JSON files, auto-saved as you type.
 
-<img src="docs/images/multiple-notes.png" alt="Two sticky notes, purple and yellow, as separate overlapping OS windows on the desktop" width="420" align="Center">
+<p align="center">
+  <img src="docs/images/multiple-notes.png" alt="Two sticky notes, purple and yellow, as separate overlapping OS windows on the desktop" width="420">
+</p>
 
 ## Repository structure
 
