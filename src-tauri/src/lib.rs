@@ -274,6 +274,31 @@ fn spawn_new_note(app: &AppHandle) {
     open_note_window(app, &note);
 }
 
+/// Runs in the *already-running* instance when a second launch is attempted.
+///
+/// A second launch almost always means the user couldn't find their notes --
+/// this app has no taskbar entry to remind them it is already running. So
+/// re-show everything that is supposed to be visible, and leave deliberately
+/// minimized notes hidden.
+///
+/// The thread hop is load-bearing, not boilerplate. This callback is dispatched
+/// from the first instance's message loop, and `open_note_window` can call
+/// `WebviewWindowBuilder::build()`. Building a window reentrantly in the middle
+/// of message dispatch is exactly the WebView2 deadlock documented on
+/// `create_note` below -- so defer through a throwaway thread the same way, to
+/// get a genuine event-loop tick rather than an inline call.
+fn restore_visible_notes(app: &AppHandle) {
+    let app = app.clone();
+    std::thread::spawn(move || {
+        let handle = app.clone();
+        let _ = app.run_on_main_thread(move || {
+            for note in notes::list_notes(&handle).iter().filter(|n| !n.minimized) {
+                open_note_window(&handle, note);
+            }
+        });
+    });
+}
+
 /// Mark a window as cleared to close, so the `CloseRequested` handler lets the
 /// next attempt through instead of asking the webview to flush again.
 fn allow_close(app: &AppHandle, label: &str) {
@@ -363,6 +388,15 @@ fn delete_note(app: AppHandle, window: tauri::Window, id: String) -> Result<(), 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        // Must be registered before every other plugin, per the plugin's own
+        // docs. Without this guard each launch opened a duplicate window for
+        // every note, at identical coordinates (both processes read position
+        // from the same files), so the twins were invisible until one was
+        // dragged aside -- and typing into the wrong one silently discarded the
+        // other's text, since `NOTE_IO` only serialises writes within a process.
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            restore_visible_notes(app);
+        }))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .manage(AppState {
