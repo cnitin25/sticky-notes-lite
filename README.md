@@ -2,6 +2,8 @@
 
 A lightweight, fully offline sticky-notes app for Windows, built with Tauri v2 (Rust backend + vanilla HTML/CSS/JS frontend, no bundler). Each note is its own draggable, resizable OS window; there's no visible main window — the app lives entirely in the system tray. Notes persist as individual JSON files, auto-saved as you type.
 
+<img src="docs/images/multiple-notes.png" alt="Two sticky notes, purple and yellow, as separate overlapping OS windows on the desktop" width="420">
+
 ## Repository structure
 
 ```
@@ -31,6 +33,16 @@ docs/DEVELOPMENT_NOTES.md       Bug history and architectural decisions -- kept 
 - No taskbar icon (tray-only); system tray menu: **New Note**, **Restore ▸**, **Quit**. The Restore submenu lists **All Notes** plus one entry per currently-minimized note, labelled by its title (or first non-blank line, or `(empty note)`), so a single note can be brought back without unhiding the rest
 - If *every* note is minimized the app legitimately starts with no windows at all — it is tray-resident, and forcing one open would defeat the point of having minimized them
 - Quitting via the tray actually exits (as opposed to the Tauri default of quitting whenever the last window closes, which would fight against the tray-resident design)
+
+## Screenshots
+
+<table>
+<tr>
+<td width="33%"><img src="docs/images/note-window.png" alt="A single note window showing the title bar, toolbar, and footer"><br>A note window — title bar, toolbar, and footer</td>
+<td width="33%"><img src="docs/images/text-wrap-off.png" alt="A note with text wrap off, showing a horizontal scrollbar"><br>Wrap off by default (the horizontal scrollbar at bottom-left is the tell)</td>
+<td width="33%"><img src="docs/images/tray-restore-menu.png" alt="The system tray menu with the Restore submenu expanded, listing minimized notes by title"><br>Tray menu — Restore submenu listing minimized notes</td>
+</tr>
+</table>
 
 ## Project layout
 
