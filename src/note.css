@@ -97,6 +97,23 @@ body {
   background: rgba(0, 0, 0, 0.1);
 }
 
+.icon-btn:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.icon-btn:disabled:hover {
+  background: transparent;
+}
+
+/* Locked: the whole note is a drag handle (see onLockedMouseDown). */
+#note.locked #content,
+#note.locked #title,
+#note.locked #titlebar,
+#note.locked #footer {
+  cursor: move;
+}
+
 .icon-btn.flash {
   background: rgba(0, 0, 0, 0.25);
 }

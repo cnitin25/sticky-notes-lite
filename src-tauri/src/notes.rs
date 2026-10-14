@@ -51,6 +51,10 @@ pub struct Note {
     /// stays minimized across a restart rather than reappearing on screen.
     #[serde(default)]
     pub minimized: bool,
+    /// Read-only: no typing, pasting, color change or delete. A file predating
+    /// this field loads unlocked.
+    #[serde(default)]
+    pub locked: bool,
     pub created_at: u64,
     pub updated_at: u64,
 }
@@ -168,6 +172,13 @@ pub fn update_note_pinned(app: &AppHandle, id: &str, pinned: bool) {
     }
 }
 
+pub fn update_note_locked(app: &AppHandle, id: &str, locked: bool) -> Result<(), String> {
+    let _guard = lock_io();
+    let mut note = read_note(app, id)?;
+    note.locked = locked;
+    write_note(app, &note)
+}
+
 /// No-op when the flag already matches, so the startup pass and every window
 /// restore don't rewrite files that have nothing to change.
 pub fn update_note_minimized(app: &AppHandle, id: &str, minimized: bool) {
@@ -220,6 +231,7 @@ pub fn create_note_default(offset: f64) -> Note {
         wrap: false,
         pinned: false,
         minimized: false,
+        locked: false,
         size: Size {
             width: 260.0,
             height: 260.0,

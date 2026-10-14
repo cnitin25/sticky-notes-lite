@@ -1,4 +1,6 @@
 mod notes;
+#[cfg(windows)]
+mod snap;
 
 use notes::{Note, NoteFields, Position, Size};
 use std::collections::{HashMap, HashSet};
@@ -250,8 +252,13 @@ fn open_note_window(app: &AppHandle, note: &Note) {
         builder = builder.always_on_top(true);
     }
 
-    if let Err(e) = builder.build() {
-        eprintln!("could not open note {}: {e}", note.id);
+    match builder.build() {
+        // Docks this note to its neighbours while it is dragged. See snap.rs.
+        #[cfg(windows)]
+        Ok(window) => snap::attach(&window),
+        #[cfg(not(windows))]
+        Ok(_) => {}
+        Err(e) => eprintln!("could not open note {}: {e}", note.id),
     }
 }
 
@@ -373,7 +380,17 @@ fn set_pinned(app: AppHandle, window: tauri::Window, id: String, pinned: bool) -
 }
 
 #[tauri::command]
+fn set_locked(app: AppHandle, id: String, locked: bool) -> Result<(), String> {
+    notes::update_note_locked(&app, &id, locked)
+}
+
+#[tauri::command]
 fn delete_note(app: AppHandle, window: tauri::Window, id: String) -> Result<(), String> {
+    // The UI disables Delete on a locked note; this keeps it true even if a
+    // stale or misbehaving webview asks anyway.
+    if notes::load_note(&app, &id)?.locked {
+        return Err("note is locked".to_string());
+    }
     notes::delete_note(&app, &id)?;
     // Drop any geometry still queued for a note that no longer exists, and skip
     // the save-and-close handshake -- there is nothing left to save into.
@@ -412,6 +429,7 @@ pub fn run() {
             minimize_note,
             close_note,
             set_pinned,
+            set_locked,
             delete_note
         ])
         .setup(|app| {

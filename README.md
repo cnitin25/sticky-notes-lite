@@ -25,6 +25,8 @@ docs/DEVELOPMENT_NOTES.md       Bug history and architectural decisions -- kept 
 - One-click **copy** (copies note content only, not the title) and **paste**
 - **Paste replaces the entire note, deliberately** — this is the intended behaviour, not an oversight. The button exists to make a note *be* whatever is on the clipboard; ordinary Ctrl+V is still available for inserting at the caret. Two consequences, both accepted: it does not confirm the way Delete does, and because it assigns `el.content.value` directly it also clears the textarea's native undo stack, so Ctrl+Z will not bring the previous content back. Don't "fix" this into an insert-at-caret — that is what Ctrl+V already does
 - **Minimize**: hides the note window, and the state is **persisted** — a note minimized when the app closes stays minimized on next launch instead of reappearing on screen. Bring one back from the tray's **Restore** submenu
+- **Lock** (padlock, bottom-left): makes a note read-only -- no typing, title edits, pasting (button or Ctrl+V), color change or **Delete** (the backend refuses to delete a locked note too). Copy, Wrap, Pin, Minimize and resize still work. While locked, pressing anywhere on the note (except its buttons, scrollbars and the resize edge) drags it. Persisted per note
+- **Snap to neighbouring notes**: drag a note within ~16px of another visible note's left/right/top/bottom edge and it docks flush against it. On release it takes that note's height and top edge (docked beside) or width and left edge (docked above/below); hold **Alt** while releasing to keep its own size. Snapped notes stay independent -- there is no grouping. Minimized notes are ignored. Done natively via `WM_MOVING` (`src-tauri/src/snap.rs`); costs nothing while idle
 - **Pin**: keeps a note always on top of every other window (not just other notes) — persisted, so a pinned note reopens pinned
 - **New note** button on every note's toolbar (in addition to the tray's "New Note") — a fresh note isn't focused automatically (click into it before typing); this is deliberate, see [`docs/DEVELOPMENT_NOTES.md`](docs/DEVELOPMENT_NOTES.md)
 - Delete with an in-page confirmation dialog (not the browser's native `confirm()`, which clips on small windows)
@@ -52,6 +54,7 @@ docs/DEVELOPMENT_NOTES.md       Bug history and architectural decisions -- kept 
 src-tauri/           Rust backend
   src/lib.rs           window management, tray, Tauri commands
   src/notes.rs         Note struct + JSON read/write (the data layer)
+  src/snap.rs          note-to-note docking while dragging (Win32 WM_MOVING subclass)
   tauri.conf.json      no default window (app.windows: []) — windows are all spawned dynamically
   capabilities/        default.json grants note-*  windows the permissions they need
 src/                 Frontend (vanilla JS, one template reused per note)

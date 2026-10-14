@@ -32,6 +32,8 @@ const el = {
   minimizeBtn: document.getElementById("minimize-btn"),
   deleteBtn: document.getElementById("delete-btn"),
   wrapBtn: document.getElementById("wrap-btn"),
+  lockBtn: document.getElementById("lock-btn"),
+  lockShackle: document.getElementById("lock-shackle"),
   confirmOverlay: document.getElementById("confirm-overlay"),
   confirmMessage: document.getElementById("confirm-message"),
   confirmOk: document.getElementById("confirm-ok"),
@@ -79,6 +81,53 @@ let loaded = false;
 let currentColor = COLORS[0];
 let wrapEnabled = false;
 let pinned = false;
+let locked = false;
+
+// Shackle closed vs swung open, so the icon reads as a state, not just a button.
+const SHACKLE_LOCKED = "M8 11V7a4 4 0 0 1 8 0v4";
+const SHACKLE_UNLOCKED = "M8 11V7a4 4 0 0 1 7.5-2";
+
+/// Width of the strip along the window edge left alone by drag-from-anywhere,
+/// so the undecorated window's own edge resizing still gets the mousedown.
+const RESIZE_EDGE_PX = 6;
+
+/// Read-only covers everything that changes the note's text or look, plus
+/// Delete. `readOnly` alone already blocks typing, Ctrl+V and drop-to-insert;
+/// the buttons are disabled here and their handlers re-check `locked` too.
+function applyLocked(enabled) {
+  locked = enabled;
+  el.title.readOnly = enabled;
+  el.content.readOnly = enabled;
+  el.colorBtn.disabled = enabled;
+  el.pasteBtn.disabled = enabled;
+  el.deleteBtn.disabled = enabled;
+  if (enabled) el.palette.classList.remove("open");
+  el.root.classList.toggle("locked", enabled);
+  el.lockBtn.classList.toggle("active", enabled);
+  el.lockShackle.setAttribute("d", enabled ? SHACKLE_LOCKED : SHACKLE_UNLOCKED);
+  el.lockBtn.title = enabled ? "Unlock note" : "Lock note (read-only, drag from anywhere)";
+}
+
+/// A locked note has nothing to click into, so any plain left-press on it
+/// starts a window drag -- except on controls, the textarea's scrollbars, and
+/// the resize strip along the window edge.
+function onLockedMouseDown(e) {
+  if (!locked || e.button !== 0) return;
+  if (e.target.closest("button, #palette, #confirm-overlay")) return;
+  if (
+    e.clientX < RESIZE_EDGE_PX ||
+    e.clientY < RESIZE_EDGE_PX ||
+    e.clientX >= window.innerWidth - RESIZE_EDGE_PX ||
+    e.clientY >= window.innerHeight - RESIZE_EDGE_PX
+  ) {
+    return;
+  }
+  if (e.target === el.content && (e.offsetX >= el.content.clientWidth || e.offsetY >= el.content.clientHeight)) {
+    return;
+  }
+  e.preventDefault();
+  appWindow.startDragging().catch((err) => console.error(err));
+}
 
 function applyPinned(enabled) {
   pinned = enabled;
@@ -194,6 +243,7 @@ async function init() {
   applyColor(note.color);
   applyWrap(note.wrap);
   applyPinned(note.pinned);
+  applyLocked(note.locked);
   loaded = true;
 
   el.title.addEventListener("input", () => {
@@ -204,6 +254,7 @@ async function init() {
 
   el.colorBtn.addEventListener("click", (e) => {
     e.stopPropagation();
+    if (locked) return;
     el.palette.classList.toggle("open");
   });
   document.addEventListener("click", () => el.palette.classList.remove("open"));
@@ -215,6 +266,7 @@ async function init() {
   });
 
   el.pasteBtn.addEventListener("click", async () => {
+    if (locked) return;
     const text = await readText();
     if (typeof text === "string" && text.length > 0) {
       el.content.value = text;
@@ -239,6 +291,21 @@ async function init() {
     }
   });
 
+  el.lockBtn.addEventListener("click", async () => {
+    // Persist first, as with pin, so a failure can't show a lock that isn't saved.
+    const next = !locked;
+    try {
+      // Locking freezes the text, so write out anything still in the debounce.
+      if (next) await flushSave();
+      await invoke("set_locked", { id: noteId, locked: next });
+      applyLocked(next);
+    } catch (err) {
+      console.error(err);
+    }
+  });
+
+  el.root.addEventListener("mousedown", onLockedMouseDown);
+
   el.minimizeBtn.addEventListener("click", async () => {
     await flushSave();
     await invoke("minimize_note");
@@ -250,6 +317,7 @@ async function init() {
   });
 
   el.deleteBtn.addEventListener("click", async () => {
+    if (locked) return;
     if (await showConfirm("Delete this note permanently?")) {
       clearTimeout(saveTimer);
       pendingSave = false;
